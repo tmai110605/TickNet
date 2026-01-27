@@ -209,6 +209,7 @@ def main():
         sum([p.data.nelement() for p in model.parameters()])))
     
         # define loss function and optimizer
+        train_loss_fn = LabelSmoothingCrossEntropy(smoothing=0.1).to(device)
         criterion = torch.nn.CrossEntropyLoss().to(device)
         optimizer = torch.optim.SGD(params=model.parameters(), lr=args.learning_rate, momentum=args.momentum, weight_decay=args.weight_decay)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=args.schedule, gamma=0.1)
