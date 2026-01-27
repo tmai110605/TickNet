@@ -183,7 +183,7 @@ def main():
     """
     args = get_args()
     print('Command: {}'.format(' '.join(sys.argv)))
-    args.gpu_id = 1
+    args.gpu_id = 0
     device = get_device(args)
     print('Using device {}'.format(device))
     
