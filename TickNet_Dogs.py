@@ -46,7 +46,7 @@ def get_args():
     Parse the command line arguments.
     """
     parser = argparse.ArgumentParser(description='TickNet training script for cifar and StanfordDogs datasets.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)    
-    parser.add_argument('-r', '--data-root', type=str, default='../../../datasets/StanfordDogs', help='Dataset root path.')
+    parser.add_argument('-r', '--data-root', type=str, default='checkpoints/StanfordDogs', help='Dataset root path.')
     #parser.add_argument('-d', '--dataset', choices=['cifar10', 'cifar100', 'dogs'], required=True, help='Dataset name.')
     parser.add_argument('-d', '--dataset', type=str, choices=['cifar10', 'cifar100', 'dogs'], default='dogs', help='Dataset name.')
     parser.add_argument('--download', action='store_true', help='Download the specified dataset before running the training.')    
