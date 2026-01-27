@@ -1,46 +1,84 @@
-import re
-import types
+import torch
+import torch.nn as nn
 
-import torch.nn
-import torch.nn.init
-
-from .common import conv1x1_block, Classifier,conv3x3_dw_blockAll,conv3x3_block
-from .SE_Attention import *
-class FR_PDP_block(torch.nn.Module):
+class FR_PDPpp_block(nn.Module):
     """
-    FR_PDP_block for TickNet.
+    Frequency-Responsive PDP Block (FR-PDP++)
     """
-    def __init__(self,
-                 in_channels,
-                 out_channels,
-                 stride):
+    def __init__(self, in_channels, out_channels, stride):
         super().__init__()
-        self.Pw1 = conv1x1_block(in_channels=in_channels,
-                                out_channels=in_channels,                                
-                                use_bn=False,
-                                activation=None)
-        self.Dw = conv3x3_dw_blockAll(channels=in_channels, stride=stride)         
-        self.Pw2 = conv1x1_block(in_channels=in_channels,
-                                             out_channels=out_channels,                                             
-                                             groups=1)
-        self.PwR = conv1x1_block(in_channels=in_channels,
-                                out_channels=out_channels,
-                                stride=stride)
-        self.stride = stride
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.stride = stride
+
+        # 1×1 pointwise (pre-projection)
+        self.Pw1 = conv1x1_block(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            use_bn=False,
+            activation=None
+        )
+
+        # multi-scale depthwise convolutions
+        self.Dw3 = nn.Conv2d(
+            in_channels, in_channels,
+            kernel_size=3, stride=stride, padding=1,
+            groups=in_channels, bias=False
+        )
+        self.Dw5 = nn.Conv2d(
+            in_channels, in_channels,
+            kernel_size=5, stride=stride, padding=2,
+            groups=in_channels, bias=False
+        )
+        self.Dw7 = nn.Conv2d(
+            in_channels, in_channels,
+            kernel_size=7, stride=stride, padding=3,
+            groups=in_channels, bias=False
+        )
+
+        # fusion 1×1
+        self.Pw2 = conv1x1_block(
+            in_channels=3 * in_channels,
+            out_channels=out_channels,
+            groups=1
+        )
+
+        # SE attention
         self.SE = SE(out_channels, 16)
+
+        # residual projection (if needed)
+        self.PwR = conv1x1_block(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            stride=stride
+        )
+
     def forward(self, x):
         residual = x
-        x = self.Pw1(x)        
-        x = self.Dw(x)        
+
+        # pointwise
+        x = self.Pw1(x)
+
+        # multi-scale depthwise
+        x3 = self.Dw3(x)
+        x5 = self.Dw5(x)
+        x7 = self.Dw7(x)
+
+        # concat along channel dim
+        x = torch.cat([x3, x5, x7], dim=1)
+
+        # fusion
         x = self.Pw2(x)
+
+        # attention
         x = self.SE(x)
+
+        # residual
         if self.stride == 1 and self.in_channels == self.out_channels:
             x = x + residual
-        else:            
-            residual = self.PwR(residual)
-            x = x + residual
+        else:
+            x = x + self.PwR(residual)
+
         return x
 
 class TickNet(torch.nn.Module):
@@ -75,7 +113,7 @@ class TickNet(torch.nn.Module):
             stage = torch.nn.Sequential()
             for unit_id, unit_channels in enumerate(stage_channels):
                 stride = strides[stage_id] if unit_id == 0 else 1                
-                stage.add_module("unit{}".format(unit_id + 1), FR_PDP_block(in_channels=in_channels, out_channels=unit_channels, stride=stride))
+                stage.add_module("unit{}".format(unit_id + 1), FR_PDPpp_block(in_channels=in_channels, out_channels=unit_channels, stride=stride))
                 in_channels = unit_channels
             self.backbone.add_module("stage{}".format(stage_id + 1), stage)
         self.final_conv_channels = 1024        
