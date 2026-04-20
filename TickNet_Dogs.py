@@ -202,7 +202,7 @@ def main():
        # model = build_TickNetv3(120, cifar=False, typesize='small', groups=typesize)
         model = build_TickNetv8(120, cifar=False, typesize='small', drop_path_max=0.10, dropout=0.20)
         model = model.to(device)
-        print_model_stats(model, input_size=(3, 224, 224))
+       # print_model_stats(model, input_size=(3, 224, 224))
         print(model)
         
         print('Number of model parameters: {}'.format(
