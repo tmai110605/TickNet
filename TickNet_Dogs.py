@@ -19,7 +19,7 @@ from models.datasets import *
 from models.TickNet import *
 
 import writeLogAcc as wA
-from checkmodel import print_model_stats
+from checkmodel import *
 class LabelSmoothingCrossEntropy(nn.Module):
     """
     NLL loss with label smoothing.
