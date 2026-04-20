@@ -16,37 +16,17 @@ import torchvision.datasets
 #from pathlib import Path
 #sys.path.append(str(Path('.').absolute().parent))
 from models.datasets import *
-from models.TickNet import *
+from models.TickNetv8 import *
+from models.cross_entropy import LabelSmoothingCrossEntropy
 import writeLogAcc as wA
-class LabelSmoothingCrossEntropy(nn.Module):
-    """
-    NLL loss with label smoothing.
-    """
-    def __init__(self, smoothing=0.1):
-        """
-        Constructor for the LabelSmoothing module.
-        :param smoothing: label smoothing factor
-        """
-        super(LabelSmoothingCrossEntropy, self).__init__()
-        assert smoothing < 1.0
-        self.smoothing = smoothing
-        self.confidence = 1. - smoothing
-
-    def forward(self, x, target):
-        # import pdb;pdb.set_trace()
-        logprobs = F.log_softmax(x, dim=-1)
-        nll_loss = -logprobs.gather(dim=-1, index=target.unsqueeze(1))
-        nll_loss = nll_loss.squeeze(1)
-        smooth_loss = -logprobs.mean(dim=-1)
-        loss = self.confidence * nll_loss + self.smoothing * smooth_loss
-        return loss.mean()#sys.path.append(str(Path('.').absolute().parent))
+from checkmodel import print_model_stats
 
 def get_args():
     """
     Parse the command line arguments.
     """
-    parser = argparse.ArgumentParser(description='TickNet training script for cifar and StanfordDogs datasets.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)    
-    parser.add_argument('-r', '--data-root', type=str, default='checkpoints/StanfordDogs', help='Dataset root path.')
+    parser = argparse.ArgumentParser(description='NetTOP training script for CIFAR and fine-grained datasets.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('-r', '--data-root', type=str, default='data', help='Dataset root path.')
     #parser.add_argument('-d', '--dataset', choices=['cifar10', 'cifar100', 'dogs'], required=True, help='Dataset name.')
     parser.add_argument('-d', '--dataset', type=str, choices=['cifar10', 'cifar100', 'dogs'], default='dogs', help='Dataset name.')
     parser.add_argument('--download', action='store_true', help='Download the specified dataset before running the training.')    
@@ -188,38 +168,36 @@ def main():
     print('Using device {}'.format(device))
     
     # print model with parameter and FLOPs counts    
-    torch.autograd.set_detect_anomaly(True)     
+    torch.autograd.set_detect_anomaly(True)             
+    #arr_typesize_groups = [2,1,4]
+    arr_typesize_groups = [1]
     
-    #arr_typesize = ['large', 'small']
-    arr_typesize = ['small']
-    for typesize in arr_typesize:    
-        strmode = 'StanfordDogs_TickNet_' + typesize + '_SE'  
-        pathout = './checkpoints/' + strmode
+    for typesize in arr_typesize_groups:    
+        strmode = 'NetTOP_groups_' + str(typesize)
+        pathout = './checkpoints/StanfordDogs_NetTOP/' + strmode
         filenameLOG = pathout + '/' + strmode + '.txt'
-        if not os.path.exists(pathout):
-            os.makedirs(pathout)
-        # get model
         
-        model = build_TickNet(120, typesize=typesize, cifar=False)                
+        # get model        
+       # model = build_TickNetv3(120, cifar=False, typesize='small', groups=typesize)
+        model = build_TickNetv8(120, cifar=False, typesize='small', drop_path_max=0.10, dropout=0.20)
         model = model.to(device)
-        
+        print_model_stats(model, input_size=(3, 224, 224))
         print(model)
         
         print('Number of model parameters: {}'.format(
         sum([p.data.nelement() for p in model.parameters()])))
-    
+        
         # define loss function and optimizer
-        train_loss_fn = LabelSmoothingCrossEntropy(smoothing=0.1).to(device)
+        train_loss_fn = LabelSmoothingCrossEntropy(smoothing=0.1).to(device)        
         criterion = torch.nn.CrossEntropyLoss().to(device)
         optimizer = torch.optim.SGD(params=model.parameters(), lr=args.learning_rate, momentum=args.momentum, weight_decay=args.weight_decay)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=args.schedule, gamma=0.1)
-        
+    
         # get train and val data loaders
         train_loader = get_data_loader(args=args, train=True)
         val_loader = get_data_loader(args=args, train=False)
-        
         if args.evaluate:
-            pathcheckpoint = "./checkpoints/StanfordDogs/small/model_best.pth"
+            pathcheckpoint = "./checkpoints/StanfordDogs/checkpoint_120_6528.pth"
             if os.path.isfile(pathcheckpoint):
                 print("=> loading checkpoint '{}'".format(pathcheckpoint))
                 checkpoint = torch.load(pathcheckpoint)
@@ -235,14 +213,16 @@ def main():
             print((n-m)/3600)
             return
         # for each epoch...
+        if not os.path.exists(pathout):
+            os.makedirs(pathout)
         acc_val_max = None
         acc_val_argmax = None
         for n_epoch in range(args.epochs):
             current_learning_rate = optimizer.param_groups[0]['lr']
             print('Starting epoch {}/{},  learning_rate={}'.format(n_epoch + 1, args.epochs, current_learning_rate))
             
-            # train
-            (loss_train, acc_train) = run_epoch(train=True, data_loader=train_loader, model=model, criterion=criterion, optimizer=optimizer, n_epoch=n_epoch, args=args, device=device)
+            # train            
+            (loss_train, acc_train) = run_epoch(train=True, data_loader=train_loader, model=model, criterion=train_loss_fn, optimizer=optimizer, n_epoch=n_epoch, args=args, device=device)
     
             # validate
             (loss_val, acc_val) = run_epoch(train=False, data_loader=val_loader, model=model, criterion=criterion, optimizer=None, n_epoch=n_epoch, args=args, device=device)
