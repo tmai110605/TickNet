@@ -16,7 +16,7 @@ import torchvision.datasets
 #from pathlib import Path
 #sys.path.append(str(Path('.').absolute().parent))
 from models.datasets import *
-from models.TickNetv8 import *
+from models.TickNet import *
 from models.cross_entropy import LabelSmoothingCrossEntropy
 import writeLogAcc as wA
 from checkmodel import print_model_stats
