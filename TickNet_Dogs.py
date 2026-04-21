@@ -189,7 +189,7 @@ def main():
     print('Using device {}'.format(device))
     
     # print model with parameter and FLOPs counts    
-    torch.autograd.set_detect_anomaly(True)             
+    #torch.autograd.set_detect_anomaly(True)             
     #arr_typesize_groups = [2,1,4]
     arr_typesize_groups = [1]
     
