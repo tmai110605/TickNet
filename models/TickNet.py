@@ -298,14 +298,14 @@ class FR_PDP_block(nn.Module):
         self.Pw1       = conv1x1(in_ch, in_ch, use_bn=False, act=None)  # mixing, no norm
         self.TOP       = MS_TOP(ch=in_ch, stride=stride)                 # [A][B][C]
         self.Pw2       = conv1x1(in_ch, out_ch)                          # channel projection
-        self.attention = SE(out_ch, r=16)                               # [D][E]
+        self.attention = SE(out_ch, reduction=16)                               # [D][E]
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0 else nn.Identity()
 
         # Shortcut branch
         self.need_proj = (stride != 1 or in_ch != out_ch)
         if self.need_proj:
             self.PwR         = conv1x1(in_ch, out_ch, stride=stride)
-            self.shortcut_se = LightSE(out_ch, r=16)   # attention trên shortcut
+            self.shortcut_se = LightSE(out_ch, reduction=16)   # attention trên shortcut
 
     def forward(self, x):
         # Main
