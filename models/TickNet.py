@@ -448,42 +448,4 @@ def build_TickNetv8(num_classes, typesize="small", cifar=False,
     )
 
 
-# =========================================================
-# Quick self-test
-# =========================================================
-if __name__ == "__main__":
-    import sys
 
-    configs = [
-        ("basic",  False, (1, 3, 224, 224), 120,  "ImageNet/Dogs basic"),
-        ("small",  False, (1, 3, 224, 224), 120,  "ImageNet/Dogs small"),
-        ("large",  False, (1, 3, 224, 224), 1000, "ImageNet large"),
-        ("small",  True,  (1, 3,  32,  32), 10,   "CIFAR-10 small"),
-        ("large",  True,  (1, 3,  32,  32), 100,  "CIFAR-100 large"),
-    ]
-
-    all_ok = True
-    print("=" * 65)
-    print(f"{'Config':<30} {'Params':>10}  {'Output':<12}  Status")
-    print("=" * 65)
-
-    for typesize, cifar, shape, nc, label in configs:
-        try:
-            model = build_TickNetv8(nc, typesize=typesize, cifar=cifar)
-            model.eval()
-            with torch.no_grad():
-                x   = torch.randn(*shape)
-                out = model(x)
-            params = sum(p.numel() for p in model.parameters()) / 1e6
-            assert out.shape == (shape[0], nc), f"shape sai: {out.shape}"
-            print(f"  {label:<28} {params:>8.3f}M  {str(out.shape):<12}  OK")
-        except Exception as e:
-            print(f"  {label:<28} {'':>10}  {'':12}  FAIL: {e}")
-            all_ok = False
-
-    print("=" * 65)
-    if all_ok:
-        print("Tất cả tests PASSED — TickNetv6 sẵn sàng train.")
-    else:
-        print("Có lỗi — kiểm tra lại.")
-        sys.exit(1)
