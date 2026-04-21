@@ -5,6 +5,7 @@ import sys
 import os
 #import inspect
 
+import torch.nn as nn
 import torch
 import torch.nn
 import torch.optim
