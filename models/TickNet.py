@@ -305,7 +305,7 @@ class FR_PDP_block(nn.Module):
         self.need_proj = (stride != 1 or in_ch != out_ch)
         if self.need_proj:
             self.PwR         = conv1x1(in_ch, out_ch, stride=stride)
-            self.shortcut_se = LightSE(out_ch, reduction=16)   # attention trên shortcut
+            self.shortcut_se = LightSE(out_ch, r=16)   # attention trên shortcut
 
     def forward(self, x):
         # Main
