@@ -110,10 +110,10 @@ class SE(nn.Module):
         s = torch.sigmoid(self.fc2(s)).view(b, c, 1, 1)
         return x * s
 # =========================================================
-# LightSE — SE nhẹ trên nhánh shortcut
+# LightSE — SE 
 # =========================================================
 class LightSE(nn.Module):
-    """SE 
+    """SE thuần GAP (chuẩn gốc), dùng cho nhánh shortcut PwR.
     Giúp shortcut cũng được attention-guided, ổn định gradient.
     Phép toán: GAP → Linear → ReLU → Linear → Sigmoid → scale."""
     def __init__(self, ch, r=16):
@@ -132,7 +132,7 @@ class LightSE(nn.Module):
 # =========================================================
 # [D] DualSE = MAF_ChannelGate
 #     CẢI TIẾN D: GAP + StdPool → FC → ReLU → FC → σ
-#     (NetTOP gốc chỉ dùng GAP đơn thuần trong SE)
+
 # =========================================================
 class MAF_ChannelGate(nn.Module):
     """Dual-Statistic Channel Attention.
@@ -298,14 +298,14 @@ class FR_PDP_block(nn.Module):
         self.Pw1       = conv1x1(in_ch, in_ch, use_bn=False, act=None)  # mixing, no norm
         self.TOP       = MS_TOP(ch=in_ch, stride=stride)                 # [A][B][C]
         self.Pw2       = conv1x1(in_ch, out_ch)                          # channel projection
-        self.attention = SE(out_ch,reduction=16)                               # [D][E]
+        self.attention = SE(out_ch, r=16)                               # [D][E]
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0 else nn.Identity()
 
         # Shortcut branch
         self.need_proj = (stride != 1 or in_ch != out_ch)
         if self.need_proj:
             self.PwR         = conv1x1(in_ch, out_ch, stride=stride)
-            self.shortcut_se = SE(out_ch, reduction=16)   # attention trên shortcut
+            self.shortcut_se = LightSE(out_ch, r=16)   # attention trên shortcut
 
     def forward(self, x):
         # Main
@@ -327,7 +327,7 @@ class FR_PDP_block(nn.Module):
 # =========================================================
 # TickNetv6 — Backbone Tick-shape
 # =========================================================
-class TickNetv8se(nn.Module):
+class TickNetv7(nn.Module):
     """TickNetv6: Tick-shape backbone với FR-PDP block (5 cải tiến).
 
     Tick-shape channels: thu hẹp → mở rộng → thu hẹp → mở rộng
@@ -400,17 +400,13 @@ class TickNetv8se(nn.Module):
 # =========================================================
 # Builder functions
 # =========================================================
-def build_TickNetv8(num_classes, typesize="small", cifar=False,
+def build_TickNetv7(num_classes, typesize="small", cifar=False,
                     drop_path_max=0.05, dropout=0.10):
     """
     typesize: "basic" | "small" | "large"
     cifar   : True → in_size=(32,32), False → in_size=(224,224)
 
-    Tick-shape channel configs (cùng với NetTOP gốc để so sánh công bằng):
-      basic : [128] [64] [128] [256] [512]             — 5 blocks
-      small : [128] [64,128] [256,512,128] [64,128,256] [512]  — 10 blocks
-      large : [128] [64,128] [256,512,128,64,128,256] [512,128,64,128,256] [512]
-    """
+     """
     init_ch = 32
 
     if typesize == "basic":
@@ -436,7 +432,7 @@ def build_TickNetv8(num_classes, typesize="small", cifar=False,
         else:
             strides = [2, 1, 2, 2, 2]
 
-    return TickNetv8se(
+    return TickNetv7(
         num_classes      = num_classes,
         init_conv_ch     = init_ch,
         init_conv_stride = init_s,
@@ -448,4 +444,42 @@ def build_TickNetv8(num_classes, typesize="small", cifar=False,
     )
 
 
+# =========================================================
+# Quick self-test
+# =========================================================
+if __name__ == "__main__":
+    import sys
 
+    configs = [
+        ("basic",  False, (1, 3, 224, 224), 120,  "ImageNet/Dogs basic"),
+        ("small",  False, (1, 3, 224, 224), 120,  "ImageNet/Dogs small"),
+        ("large",  False, (1, 3, 224, 224), 1000, "ImageNet large"),
+        ("small",  True,  (1, 3,  32,  32), 10,   "CIFAR-10 small"),
+        ("large",  True,  (1, 3,  32,  32), 100,  "CIFAR-100 large"),
+    ]
+
+    all_ok = True
+    print("=" * 65)
+    print(f"{'Config':<30} {'Params':>10}  {'Output':<12}  Status")
+    print("=" * 65)
+
+    for typesize, cifar, shape, nc, label in configs:
+        try:
+            model = build_TickNetv7(nc, typesize=typesize, cifar=cifar)
+            model.eval()
+            with torch.no_grad():
+                x   = torch.randn(*shape)
+                out = model(x)
+            params = sum(p.numel() for p in model.parameters()) / 1e6
+            assert out.shape == (shape[0], nc), f"shape sai: {out.shape}"
+            print(f"  {label:<28} {params:>8.3f}M  {str(out.shape):<12}  OK")
+        except Exception as e:
+            print(f"  {label:<28} {'':>10}  {'':12}  FAIL: {e}")
+            all_ok = False
+
+    print("=" * 65)
+    if all_ok:
+        print("Tất cả tests PASSED — TickNetv6 sẵn sàng train.")
+    else:
+        print("Có lỗi — kiểm tra lại.")
+        sys.exit(1)
