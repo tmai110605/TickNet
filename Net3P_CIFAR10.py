@@ -172,8 +172,8 @@ def run_epoch(train, data_loader, model, criterion, optimizer, n_epoch, args, de
             loss.backward()
             optimizer.step()
     
-        if (n_batch % 10) == 0:
-            print('[{}]  epoch {}/{},  batch {}/{},  loss_{}={:.5f},  acc_{}={:.2f}%'.format('train' if train else ' val ', n_epoch + 1, args.epochs, n_batch + 1, batch_count, "train" if train else "val", loss_item, "train" if train else "val", 100.0 * acc))
+      #  if (n_batch % 10) == 0:
+          #  print('[{}]  epoch {}/{},  batch {}/{},  loss_{}={:.5f},  acc_{}={:.2f}%'.format('train' if train else ' val ', n_epoch + 1, args.epochs, n_batch + 1, batch_count, "train" if train else "val", loss_item, "train" if train else "val", 100.0 * acc))
     
     return (sum(losses) / len(losses), sum(accs) / len(accs))
             
@@ -204,7 +204,7 @@ def main():
         #model = build_NetTOP(10, cifar=True,groups=typesize)
         model = build_TickNetv7(120, cifar=False, typesize='small', drop_path_max=0.10, dropout=0.20)
         model = model.to(device)
-        print_model_stats(model, input_size=(3,32,32))
+        #print_model_stats(model, input_size=(3,32,32))
         print(model)
         
         print('Number of model parameters: {}'.format(
