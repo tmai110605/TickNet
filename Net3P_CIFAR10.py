@@ -202,7 +202,7 @@ def main():
         # get model
          
         #model = build_NetTOP(10, cifar=True,groups=typesize)
-        model = build_TickNetv7(10, cifar=True, typesize='small', drop_path_max=0.10, dropout=0.20)
+        model = build_TickNet(10, cifar=True, typesize='small', drop_path_max=0.10, dropout=0.20)
         model = model.to(device)
         #print_model_stats(model, input_size=(3,32,32))
         print(model)
