@@ -1,485 +1,215 @@
-"""
-=========================================================
-5 CẢI TIẾN SO VỚI NETTOP GỐC:
-
-[A] Multi-scale DW 5×5 trên XZ/YZ (MS_TOP)
-    NetTOP gốc: Conv2d(C,C,k=3,groups=C) trên mặt phẳng XZ/YZ
-    Cải tiến  : Conv1d k=3 + Conv1d k=5 song song → element-wise add
-    Phép toán : DW Conv + add (giống MixConv 2019)
-
-[B] Multi-scale DW 5×5 trên XY (MS_TOP)
-    NetTOP gốc: conv3x3_dw_block trên nhánh spatial XY
-    Cải tiến  : Conv2d(C,C,k=3,groups=C) + Conv2d(C,C,k=5,groups=C) → add
-    Phép toán : DW Conv2d + add (giống Inception parallel branch)
-
-[C] Learnable fusion σ(α⊙xz + β⊙yz) (MS_TOP)
-    NetTOP gốc: F.sigmoid(xz * yz)  — nhân cứng
-    Cải tiến  : sigmoid(alpha * xz + beta * yz), alpha/beta = nn.Parameter
-    Phép toán : weighted sum + sigmoid (giống γ,β trong BatchNorm)
-
-[D] Dual-Statistic SE — DualSE = MAF_ChannelGate (MAF)
-    NetTOP gốc: SE = GAP → FC → ReLU → FC → σ
-    Cải tiến  : [GAP ; StdPool] → FC → ReLU → FC → σ
-    Phép toán : Pooling + cat + Linear + Sigmoid (cùng họ SE, thêm std())
-
-[E] Spatial Gate Conv 7×7 — MAF_SpatialGate (MAF)
-    NetTOP gốc: KHÔNG có spatial attention
-    Cải tiến  : mean(C) + max(C) → Conv2d(2,1,k=7) → sigmoid → scale
-    Phép toán : ChannelPool + Conv2d(99 params) + Sigmoid (= CBAM Spatial)
-
-
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import models.SE_Attention
 
+# Giả định  đã có các hàm cơ bản trong common.py như file gốc
+from models.common import conv1x1_block, conv3x3_block
 
-# =========================================================
-# DropPath (Stochastic Depth)
-# =========================================================
-class DropPath(nn.Module):
-    """Drop toàn bộ residual branch theo xác suất p khi training.
-    Inference: identity. p=0 → zero overhead."""
-    def __init__(self, p=0.0):
-        super().__init__()
-        self.p = p
+# Tích hợp MAF Attention cải tiến
+from models.MAF_Attention import MAF  
 
-    def forward(self, x):
-        if self.p == 0.0 or not self.training:
-            return x
-        keep = 1.0 - self.p
-        mask = x.new_empty((x.shape[0],) + (1,) * (x.ndim - 1)).bernoulli_(keep)
-        return x * mask.div_(keep)
-
-    def extra_repr(self):
-        return f"p={self.p:.4f}"
-
-
-# =========================================================
-# Basic layers — self-contained (không cần common.py)
-# =========================================================
-class ConvBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, k, s, p, groups=1,
-                 bias=False, use_bn=True, act="relu"):
-        super().__init__()
-        self.conv = nn.Conv2d(in_ch, out_ch, k, s, p, groups=groups, bias=bias)
-        self.bn   = nn.BatchNorm2d(out_ch) if use_bn else None
-        self.act  = nn.ReLU(inplace=True) if act == "relu" else None
-
-    def forward(self, x):
-        x = self.conv(x)
-        if self.bn  is not None: x = self.bn(x)
-        if self.act is not None: x = self.act(x)
-        return x
-
-
-def conv1x1(in_ch, out_ch, stride=1, groups=1, use_bn=True, act="relu"):
-    return ConvBlock(in_ch, out_ch, 1, stride, 0, groups, False, use_bn, act)
-
-def conv3x3(in_ch, out_ch, stride=1, groups=1, use_bn=True, act="relu"):
-    return ConvBlock(in_ch, out_ch, 3, stride, 1, groups, False, use_bn, act)
-
-
-class Classifier(nn.Module):
-    def __init__(self, in_ch, num_classes):
-        super().__init__()
-        self.conv = nn.Conv2d(in_ch, num_classes, 1, bias=True)
-
-    def forward(self, x):
-        return self.conv(x).view(x.size(0), -1)
-
-    def init_params(self):
-        nn.init.xavier_normal_(self.conv.weight, gain=1.0)
-        nn.init.constant_(self.conv.bias, 0)
-
-class SE(nn.Module):
-    """Squeeze-and-Excitation channel attention."""
-    def __init__(self, channels, reduction=16):
-        super().__init__()
-        mid = max(channels // reduction, 4)
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.fc1 = nn.Linear(channels, mid)
-        self.fc2 = nn.Linear(mid, channels)
-
-    def forward(self, x):
-        b, c, _, _ = x.size()
-        s = self.pool(x).view(b, c)
-        s = F.relu(self.fc1(s), inplace=True)
-        s = torch.sigmoid(self.fc2(s)).view(b, c, 1, 1)
-        return x * s
-# =========================================================
-# LightSE — SE 
-# =========================================================
-class LightSE(nn.Module):
-    """SE thuần GAP (chuẩn gốc), dùng cho nhánh shortcut PwR.
-    Giúp shortcut cũng được attention-guided, ổn định gradient.
-    Phép toán: GAP → Linear → ReLU → Linear → Sigmoid → scale."""
-    def __init__(self, ch, r=16):
-        super().__init__()
-        mid = max(ch // r, 4)
-        self.fc1 = nn.Linear(ch, mid)
-        self.fc2 = nn.Linear(mid, ch)
-
-    def forward(self, x):
-        b, c, _, _ = x.size()
-        s = F.adaptive_avg_pool2d(x, 1).view(b, c)          # GAP
-        s = torch.sigmoid(self.fc2(F.relu(self.fc1(s), inplace=True)))
-        return x * s.view(b, c, 1, 1)
-
-
-# =========================================================
-# [D] DualSE = MAF_ChannelGate
-#     CẢI TIẾN D: GAP + StdPool → FC → ReLU → FC → σ
-
-# =========================================================
-class MAF_ChannelGate(nn.Module):
-    """Dual-Statistic Channel Attention.
-
-    NetTOP gốc (SE):  GAP(x) → FC → ReLU → FC → σ
-    Cải tiến [D]   : [GAP(x) ; Std(x)] → FC → ReLU → FC → σ
-
-    Thêm StdPool bắt được phân tán của feature map —
-    channel nào có std cao = thông tin đa dạng → được trọng số cao hơn.
-    Phép toán: AdaptiveAvgPool + tensor.std() + cat + Linear×2 + Sigmoid.
-    """
-    def __init__(self, ch, r=16):
-        super().__init__()
-        mid = max(ch // r, 4)
-        self.fc1 = nn.Linear(ch * 2, mid)   # input: [avg ; std] → 2C
-        self.fc2 = nn.Linear(mid, ch)
-
-    def forward(self, x):
-        b, c, h, w = x.size()
-        avg = F.adaptive_avg_pool2d(x, 1).view(b, c)              # (B,C) — GAP
-        std = x.view(b, c, -1).std(dim=2, unbiased=False)         # (B,C) — StdPool
-        std = std.clamp(min=1e-5)
-        desc  = torch.cat([avg, std], dim=1)                       # (B, 2C)
-        scale = torch.sigmoid(self.fc2(F.relu(self.fc1(desc), inplace=True)))
-        return x * scale.view(b, c, 1, 1)
-
-
-# =========================================================
-# [E] Spatial Gate — MAF_SpatialGate
-#     CẢI TIẾN E: ChannelPool → Conv2d(2,1,k=7) → σ → scale
-#     (NetTOP gốc KHÔNG có spatial attention)
-# =========================================================
-class MAF_SpatialGate(nn.Module):
-    """Spatial Attention via Conv 7×7 (= CBAM Spatial Branch).
-
-    NetTOP gốc: không có spatial attention.
-    Cải tiến [E]: mean(C) + max(C) → Conv2d(2→1, k=7) → sigmoid → scale.
-
-    Params: 2×1×7×7 + 1 bias = 99 params — cực nhẹ.
-    Phép toán: Channel pooling (mean+max) + Conv2d + Sigmoid.
-    """
-    def __init__(self):
-        super().__init__()
-        self.conv = nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=True)
-
-    def forward(self, x):
-        avg = x.mean(dim=1, keepdim=True)           # (B,1,H,W) — channel avg pool
-        mx, _ = x.max(dim=1, keepdim=True)          # (B,1,H,W) — channel max pool
-        desc = torch.cat([avg, mx], dim=1)           # (B,2,H,W)
-        att  = torch.sigmoid(self.conv(desc))        # (B,1,H,W) — spatial map
-        return x * att                               # element-wise scale
-
-
-# =========================================================
-# MAF = DualSE [D] + Spatial [E] — nối tiếp
-# =========================================================
-class MAF(nn.Module):
-    """Multi-scale Attention Fusion (Channel → Spatial).
-    Kết hợp cải tiến [D] và [E]:
-      Channel: DualSE  (GAP+STD → FC×2 → σ)
-      Spatial: SpatialGate (ChannelPool → Conv7×7 → σ)
-    """
-    def __init__(self, ch, r=16):
-        super().__init__()
-        self.ch_gate = MAF_ChannelGate(ch, r)   # [D]
-        self.sp_gate = MAF_SpatialGate()         # [E]
-
-    def forward(self, x):
-        x = self.ch_gate(x)   # channel re-weighting
-        x = self.sp_gate(x)   # spatial re-weighting
-        return x
-
-
-# =========================================================
-# [A][B][C] MS_TOP — Multi-Scale Three Orthogonal Planes
-# =========================================================
-class MS_TOP(nn.Module):
-    """Multi-Scale TOP Operator — 3 cải tiến A, B, C tích hợp.
-
-    [B] XY branch: DW 3×3 + DW 5×5 → BN → ReLU
-        NetTOP gốc: chỉ dùng conv3x3_dw_block (DW k=3 đơn scale)
-        Cải tiến  : Conv2d(C,C,k=3,g=C) + Conv2d(C,C,k=5,g=C) → add
-
-    [A] XZ/YZ branch: Conv1d k=3 + Conv1d k=5 → BN → ReLU
-        NetTOP gốc: torch.transpose + DW3×3 (sai chiều hình học)
-        Cải tiến  : permute+view → Conv1d k=3 + Conv1d k=5 → add
-
-    [C] Fusion: gate = σ(α⊙f_xz + β⊙f_yz)
-        NetTOP gốc: F.sigmoid(xz * yz) — cứng
-        Cải tiến  : sigmoid(alpha*xz + beta*yz), alpha/beta = nn.Parameter
-    """
-    def __init__(self, ch, stride=1):
-        super().__init__()
+# =============================================================================
+# 1. TOÁN TỬ TOP (NETTOP) - Trích xuất đặc trưng đa mặt phẳng
+# =============================================================================
+class TOP_Operator(nn.Module):
+    def __init__(self, channels, stride=1):
+        super(TOP_Operator, self).__init__()
         self.stride = stride
-
-        # [B] XY: Multi-scale DW 2D (cải tiến B)
-        self.dw_xy_3 = nn.Conv2d(ch, ch, 3, stride, 1, groups=ch, bias=False)
-        self.dw_xy_5 = nn.Conv2d(ch, ch, 5, stride, 2, groups=ch, bias=False)
-        self.bn_xy   = nn.BatchNorm2d(ch)
-
-        # [A] XZ: Multi-scale DW 1D (cải tiến A)
-        self.dw_xz_3 = nn.Conv1d(ch, ch, 3, 1, 1, groups=ch, bias=False)
-        self.dw_xz_5 = nn.Conv1d(ch, ch, 5, 1, 2, groups=ch, bias=False)
-        self.bn_xz   = nn.BatchNorm2d(ch)
-
-        # [A] YZ: Multi-scale DW 1D (cải tiến A)
-        self.dw_yz_3 = nn.Conv1d(ch, ch, 3, 1, 1, groups=ch, bias=False)
-        self.dw_yz_5 = nn.Conv1d(ch, ch, 5, 1, 2, groups=ch, bias=False)
-        self.bn_yz   = nn.BatchNorm2d(ch)
-
-        # Stride handling cho XZ/YZ
-        self.pool = nn.AvgPool2d(stride, stride) if stride > 1 else nn.Identity()
-
-        # [C] Learnable fusion parameters (cải tiến C)
-        # Thay F.sigmoid(xz * yz) bằng sigmoid(alpha*xz + beta*yz)
-        self.alpha = nn.Parameter(torch.full((1, ch, 1, 1), 0.5))
-        self.beta  = nn.Parameter(torch.full((1, ch, 1, 1), 0.5))
+        
+        # Tích chập chiều sâu cho mặt phẳng không gian XY
+        self.dw_xy = nn.Conv2d(channels, channels, 3, stride, 1, groups=channels, bias=False)
+        self.bn_xy = nn.BatchNorm2d(channels)
+        
+        # Tích chập chiều sâu cho mặt phẳng XZ và YZ
+        self.dw_xz = nn.Conv2d(channels, channels, 3, 1, 1, groups=channels, bias=False)
+        self.bn_xz = nn.BatchNorm2d(channels)
+        
+        self.dw_yz = nn.Conv2d(channels, channels, 3, 1, 1, groups=channels, bias=False)
+        self.bn_yz = nn.BatchNorm2d(channels)
+        
+        # Dùng AvgPool thay vì MaxPool: 
+        # Giúp giữ lại thông tin bối cảnh mượt mà hơn khi giảm chiều (stride=2)
+        self.pool = nn.AvgPool2d(kernel_size=stride, stride=stride) if stride > 1 else nn.Identity()
 
     def forward(self, x):
-        b, c, h, w = x.size()
+        # 1. Mặt phẳng XY (Không gian chuẩn: B x C x H x W)
+        f_xy = self.bn_xy(self.dw_xy(x))
 
-        # --- [B] XY branch: DW 3×3 + DW 5×5 song song ---
-        f_xy = self.dw_xy_3(x) + self.dw_xy_5(x)          # multi-scale add
-        f_xy = F.relu(self.bn_xy(f_xy), inplace=True)
+        # 2. Mặt phẳng XZ (Hoán vị W và C)
+        x_xz = x.permute(0, 3, 1, 2) 
+        f_xz = self.bn_xz(self.dw_xz(x_xz)).permute(0, 2, 3, 1) 
+        f_xz = self.pool(f_xz)
 
-        # --- [A] XZ branch: permute → Conv1d k=3+k=5 → reshape back ---
-        # x: (B,C,H,W) → permute(0,2,1,3) → (B,H,C,W) → view → (B*H, C, W)
-        t_xz = x.permute(0, 2, 1, 3).contiguous().view(b * h, c, w)
-        f_xz = self.dw_xz_3(t_xz) + self.dw_xz_5(t_xz)   # (B*H, C, W)
-        f_xz = f_xz.view(b, h, c, w).permute(0, 2, 1, 3).contiguous()
-        f_xz = F.relu(self.pool(self.bn_xz(f_xz)), inplace=True)
+        # 3. Mặt phẳng YZ (Hoán vị H và C)
+        x_yz = x.permute(0, 2, 3, 1) 
+        f_yz = self.bn_yz(self.dw_yz(x_yz)).permute(0, 3, 1, 2)
+        f_yz = self.pool(f_yz)
 
-        # --- [A] YZ branch: permute → Conv1d k=3+k=5 → reshape back ---
-        # x: (B,C,H,W) → permute(0,3,1,2) → (B,W,C,H) → view → (B*W, C, H)
-        t_yz = x.permute(0, 3, 1, 2).contiguous().view(b * w, c, h)
-        f_yz = self.dw_yz_3(t_yz) + self.dw_yz_5(t_yz)   # (B*W, C, H)
-        f_yz = f_yz.view(b, w, c, h).permute(0, 2, 3, 1).contiguous()
-        f_yz = F.relu(self.pool(self.bn_yz(f_yz)), inplace=True)
-
-        # --- [C] Learnable fusion: σ(α⊙xz + β⊙yz) thay sigmoid(xz*yz) ---
-        gate = torch.sigmoid(self.alpha * f_xz + self.beta * f_yz)
-        return F.relu(f_xy * gate, inplace=True)
+        # Hợp nhất đặc trưng
+        combined = f_xy * torch.sigmoid(f_xz * f_yz)
+        
+        # SỬ DỤNG RELU TIÊU CHUẨN
+        return torch.relu(combined)
 
 
-# =========================================================
-# FR-PDP Block — tích hợp cả 5 cải tiến
-# =========================================================
+# =============================================================================
+# 2. KHỐI LAI FR-PDP-TOP
+# =============================================================================
 class FR_PDP_block(nn.Module):
-    """Full-Residual Parallel Depthwise + Pointwise Block.
-
-    Luồng:
-        Main   : Pw1(no BN/act) → MS_TOP[A,B,C] → Pw2 → MAF[D,E] → DropPath
-        Shortcut: identity  hoặc  PwR → LightSE  (khi stride>1 hoặc ch thay đổi)
-        Output : main + shortcut
-    """
-    def __init__(self, in_ch, out_ch, stride, drop_path_rate=0.0):
-        super().__init__()
+    def __init__(self, in_channels, out_channels, stride):
+        super(FR_PDP_block, self).__init__()
         self.stride = stride
-        self.in_ch  = in_ch
-        self.out_ch = out_ch
+        self.in_channels = in_channels
+        self.out_channels = out_channels
 
-        # Main branch
-        self.Pw1       = conv1x1(in_ch, in_ch, use_bn=False, act=None)  # mixing, no norm
-        self.TOP       = MS_TOP(ch=in_ch, stride=stride)                 # [A][B][C]
-        self.Pw2       = conv1x1(in_ch, out_ch)                          # channel projection
-        self.attention = SE(out_ch, reduction=16)                               # [D][E]
-        self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0 else nn.Identity()
-
-        # Shortcut branch
-        self.need_proj = (stride != 1 or in_ch != out_ch)
-        if self.need_proj:
-            self.PwR         = conv1x1(in_ch, out_ch, stride=stride)
-            self.shortcut_se = LightSE(out_ch, r=16)   # attention trên shortcut
-
-    def forward(self, x):
-        # Main
-        out = self.Pw1(x)
-        out = self.TOP(out)        # [A][B][C]
-        out = self.Pw2(out)
-        out = self.attention(out)  # [D][E]
-        out = self.drop_path(out)
-
-        # Shortcut
-        if self.need_proj:
-            shortcut = self.shortcut_se(self.PwR(x))
-        else:
-            shortcut = x
-
-        return out + shortcut
-
-
-# =========================================================
-# TickNetv6 — Backbone Tick-shape
-# =========================================================
-class TickNetv7(nn.Module):
-    """TickNetv6: Tick-shape backbone với FR-PDP block (5 cải tiến).
-
-    Tick-shape channels: thu hẹp → mở rộng → thu hẹp → mở rộng
-    (khác NetTOP backbone tuyến tính 64→512)
-    """
-    def __init__(self, num_classes, init_conv_ch, init_conv_stride,
-                 channels, strides, in_ch=3, in_size=(224, 224),
-                 use_data_bn=True, drop_path_max=0.05, dropout=0.10):
-        super().__init__()
-        self.in_size = in_size
-
-        # Linear DropPath schedule: block 0 ≈ 0, block cuối = drop_path_max
-        total_blocks = sum(len(s) for s in channels)
-        dpr = [i / max(total_blocks - 1, 1) * drop_path_max
-               for i in range(total_blocks)]
-
-        self.backbone = nn.Sequential()
-        if use_data_bn:
-            self.backbone.add_module("data_bn", nn.BatchNorm2d(in_ch))
-        self.backbone.add_module("init_conv",
-            conv3x3(in_ch, init_conv_ch, stride=init_conv_stride))
-
-        cur_ch  = init_conv_ch
-        blk_idx = 0
-        for sid, stage_ch in enumerate(channels):
-            stage = nn.Sequential()
-            for uid, uch in enumerate(stage_ch):
-                s = strides[sid] if uid == 0 else 1
-                stage.add_module(f"unit{uid + 1}",
-                    FR_PDP_block(cur_ch, uch, s,
-                                 drop_path_rate=dpr[blk_idx]))
-                cur_ch   = uch
-                blk_idx += 1
-            self.backbone.add_module(f"stage{sid + 1}", stage)
-
-        self.final_ch = 1024
-        self.backbone.add_module("final_conv",
-            conv1x1(cur_ch, self.final_ch, act="relu"))
-        self.backbone.add_module("global_pool", nn.AdaptiveAvgPool2d(1))
-
-        self.dropout    = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        self.classifier = Classifier(self.final_ch, num_classes)
-        self._init_params()
-
-    def _init_params(self):
-        for m in self.backbone.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Conv1d):
-                nn.init.kaiming_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-        self.classifier.init_params()
+        # Lớp Pw1
+        self.Pw1 = conv1x1_block(in_channels=in_channels,
+                                 out_channels=in_channels,                                
+                                 use_bn=False,
+                                 activation=None)
+        
+        # Lớp TOP
+        self.TOP = TOP_Operator(channels=in_channels, stride=stride) 
+        
+        # Lớp Pw2
+        self.Pw2 = conv1x1_block(in_channels=in_channels,
+                                 out_channels=out_channels,                                             
+                                 groups=1)
+        
+        # Nhánh Identity (Full-Residual)
+        self.PwR = conv1x1_block(in_channels=in_channels,
+                                 out_channels=out_channels,
+                                 stride=stride)
+        
+        # GỌI MAF ATTENTION THAY VÌ SE
+        self.attention = MAF(out_channels, 16) 
 
     def forward(self, x):
-        x = self.backbone(x)
+        residual = x
+        
+        # Nhánh chính
+        x = self.Pw1(x)        
+        x = self.TOP(x)
+        x = self.Pw2(x)
+        x = self.attention(x)
+        
+        # Nhánh Residual kết nối tắt
+        if self.stride == 1 and self.in_channels == self.out_channels:
+            x = x + residual
+        else:            
+            residual = self.PwR(residual)
+            x = x + residual
+            
+        return x
+
+
+# =============================================================================
+# 3. KIẾN TRÚC MẠNG STICKNET_TOP_LARGE (15 BLOCKS)
+# =============================================================================
+class TOP_Operator(nn.Module):
+    def __init__(self, channels, stride=1):
+        super(TOP_Operator, self).__init__()
+        self.stride = stride
+        
+        # Mặt phẳng XY (Không gian chuẩn 2D: H x W)
+        self.dw_xy = nn.Conv2d(channels, channels, 3, stride, 1, groups=channels, bias=False)
+        self.bn_xy = nn.BatchNorm2d(channels)
+        
+        # Mặt phẳng XZ (Dùng Conv1d chạy dọc theo Width, chia sẻ trọng số qua Height)
+        self.dw_xz = nn.Conv1d(channels, channels, 3, 1, 1, groups=channels, bias=False)
+        self.bn_xz = nn.BatchNorm2d(channels)
+        
+        # Mặt phẳng YZ (Dùng Conv1d chạy dọc theo Height, chia sẻ trọng số qua Width)
+        self.dw_yz = nn.Conv1d(channels, channels, 3, 1, 1, groups=channels, bias=False)
+        self.bn_yz = nn.BatchNorm2d(channels)
+        
+        self.pool = nn.AvgPool2d(kernel_size=stride, stride=stride) if stride > 1 else nn.Identity()
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        # 1. Mặt phẳng XY [B, C, H, W]
+        f_xy = self.bn_xy(self.dw_xy(x))
+
+        # 2. Mặt phẳng XZ 
+        # Biến đổi [B, C, H, W] -> [B, H, C, W] -> [B*H, C, W] để chạy Conv1d
+        x_xz = x.permute(0, 2, 1, 3).contiguous().view(b * h, c, w)
+        f_xz = self.dw_xz(x_xz)
+        # Khôi phục lại [B, H, C, W] -> [B, C, H, W]
+        f_xz = f_xz.view(b, h, c, w).permute(0, 2, 1, 3).contiguous()
+        f_xz = self.pool(self.bn_xz(f_xz))
+
+        # 3. Mặt phẳng YZ
+        # Biến đổi [B, C, H, W] -> [B, W, C, H] -> [B*W, C, H] để chạy Conv1d
+        x_yz = x.permute(0, 3, 1, 2).contiguous().view(b * w, c, h)
+        f_yz = self.dw_yz(x_yz)
+        # Khôi phục lại [B, W, C, H] -> [B, C, H, W]
+        f_yz = f_yz.view(b, w, c, h).permute(0, 2, 3, 1).contiguous()
+        f_yz = self.pool(self.bn_yz(f_yz))
+
+        # Hợp nhất đặc trưng theo công thức NetTOP
+        combined = f_xy * torch.sigmoid(f_xz * f_yz)
+        return torch.relu(combined)
+
+
+# =============================================================================
+# 4. KIẾN TRÚC MẠNG STICKNET_TOP_SMALL (7 BLOCKS)
+# =============================================================================
+class STickNet_TOP_Small(nn.Module):
+    def __init__(self, num_classes=1000, cifar=False):
+        super(STickNet_TOP_Small, self).__init__()
+        init_stride = 1 if cifar else 2
+        
+        # 1. Giai đoạn đầu (Input: 224x224 -> Output: 112x112)
+        self.initial = conv3x3_block(in_channels=3, out_channels=32, stride=init_stride)
+
+        # 2. Khối Perceptron bổ sung (Spread-learned spatial features)
+        # TỐI ƯU FLOPS: Giữ nguyên số kênh là 32 tại độ phân giải cao (112x112). 
+        # Việc này tiết kiệm > 800 Triệu MACs so với việc đẩy lên 256.
+        self.extra_perceptron = FR_PDP_block(in_channels=32, out_channels=32, stride=1)
+
+        # 3. Cấu trúc xương sống (Backbone) - Chuẩn Tick-Shape
+        self.backbone = nn.Sequential(
+            FR_PDP_block(32,  128, stride=2),  # Đi lên Đỉnh 1 (Kích thước giảm còn 56x56)
+            FR_PDP_block(128, 64,  stride=1),  # Xuống Đáy 1  (56x56)
+            FR_PDP_block(64,  128, stride=1),  # Phục hồi kênh (56x56)
+            
+            FR_PDP_block(128, 256, stride=2),  # Đi lên Đỉnh 2 (Kích thước giảm còn 28x28)
+            FR_PDP_block(256, 128, stride=1),  # Xuống dần    (28x28)
+            FR_PDP_block(128, 64,  stride=1),  # Xuống Đáy 2  (28x28)
+            
+            FR_PDP_block(64,  512, stride=2),  # Tăng tốc cuối (Kích thước giảm còn 14x14)
+        )
+
+        # 4. Giai đoạn cuối và phân loại
+        self.final_conv = conv1x1_block(in_channels=512, out_channels=1024, stride=1)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.flatten = nn.Flatten()
+        self.dropout = nn.Dropout(p=0.2)
+        self.classifier = nn.Linear(1024, num_classes)
+
+    def forward(self, x):
+        x = self.initial(x)
+        x = self.extra_perceptron(x) 
+        x = self.backbone(x)         
+        x = self.final_conv(x)
+        x = self.avgpool(x)
+        x = self.flatten(x)
         x = self.dropout(x)
-        return self.classifier(x)
+        x = self.classifier(x)
+        return x
 
-
-# =========================================================
-# Builder functions
-# =========================================================
-def build_TickNetv7(num_classes, typesize="small", cifar=False,
-                    drop_path_max=0.05, dropout=0.10):
-    """
-    typesize: "basic" | "small" | "large"
-    cifar   : True → in_size=(32,32), False → in_size=(224,224)
-
-     """
-    init_ch = 32
-
-    if typesize == "basic":
-        channels = [[128], [64], [128], [256], [512]]
-    elif typesize == "small":
-        channels = [[128], [64, 128], [256, 512, 128], [64, 128, 256], [512]]
-    elif typesize == "large":
-        channels = [[128], [64, 128],
-                    [256, 512, 128, 64, 128, 256],
-                    [512, 128, 64, 128, 256],
-                    [512]]
+# =============================================================================
+# HÀM BUILD MODEL ĐÃ HỖ TRỢ CẢ BẢN LARGE VÀ SMALL
+# =============================================================================
+def build_TickNet(num_classes=1000, typesize='large_new', cifar=False):
+    if typesize in ['large_new', 'large_large_new', 'large']:
+        print("Đang khởi tạo STickNet_TOP (LARGE - 15 blocks) với MAF Attention & ReLU...")
+        model = TOP_Operator(num_classes=num_classes, cifar=cifar)
+    elif typesize in ['small', 'small_new']:
+        print("Đang khởi tạo STickNet_TOP (SMALL - 7 blocks) với MAF Attention & ReLU...")
+        model = STickNet_TOP_Small(num_classes=num_classes, cifar=cifar)
     else:
-        raise ValueError(f"typesize không hợp lệ: '{typesize}'. "
-                         f"Chọn: 'basic', 'small', 'large'")
-
-    if cifar:
-        in_size, init_s = (32, 32), 1
-        strides = [1, 1, 2, 2, 2]
-    else:
-        in_size, init_s = (224, 224), 2
-        if typesize == "basic":
-            strides = [1, 2, 2, 2, 2]
-        else:
-            strides = [2, 1, 2, 2, 2]
-
-    return TickNetv7(
-        num_classes      = num_classes,
-        init_conv_ch     = init_ch,
-        init_conv_stride = init_s,
-        channels         = channels,
-        strides          = strides,
-        in_size          = in_size,
-        drop_path_max    = drop_path_max,
-        dropout          = dropout,
-    )
-
-
-# =========================================================
-# Quick self-test
-# =========================================================
-if __name__ == "__main__":
-    import sys
-
-    configs = [
-        ("basic",  False, (1, 3, 224, 224), 120,  "ImageNet/Dogs basic"),
-        ("small",  False, (1, 3, 224, 224), 120,  "ImageNet/Dogs small"),
-        ("large",  False, (1, 3, 224, 224), 1000, "ImageNet large"),
-        ("small",  True,  (1, 3,  32,  32), 10,   "CIFAR-10 small"),
-        ("large",  True,  (1, 3,  32,  32), 100,  "CIFAR-100 large"),
-    ]
-
-    all_ok = True
-    print("=" * 65)
-    print(f"{'Config':<30} {'Params':>10}  {'Output':<12}  Status")
-    print("=" * 65)
-
-    for typesize, cifar, shape, nc, label in configs:
-        try:
-            model = build_TickNetv7(nc, typesize=typesize, cifar=cifar)
-            model.eval()
-            with torch.no_grad():
-                x   = torch.randn(*shape)
-                out = model(x)
-            params = sum(p.numel() for p in model.parameters()) / 1e6
-            assert out.shape == (shape[0], nc), f"shape sai: {out.shape}"
-            print(f"  {label:<28} {params:>8.3f}M  {str(out.shape):<12}  OK")
-        except Exception as e:
-            print(f"  {label:<28} {'':>10}  {'':12}  FAIL: {e}")
-            all_ok = False
-
-    print("=" * 65)
-    if all_ok:
-        print("Tất cả tests PASSED — TickNetv6 sẵn sàng train.")
-    else:
-        print("Có lỗi — kiểm tra lại.")
-        sys.exit(1)
+        raise NotImplementedError(f"Phiên bản {typesize} chưa được triển khai với kiến trúc lai mới.")
+    
+    return model
