@@ -49,7 +49,7 @@ def get_args():
     #parser.add_argument('-r', '--data-root', type=str, required=True, help='Dataset root path.')
     parser.add_argument('-r', '--data-root', type=str, default='data', help='Dataset root path.')
     #parser.add_argument('-d', '--dataset', choices=['cifar10', 'cifar100', 'dogs'], required=True, help='Dataset name.')
-    parser.add_argument('-d', '--dataset', type=str, choices=['cifar10', 'cifar100', 'dogs'], default='cifar10', help='Dataset name.')
+    parser.add_argument('-d', '--dataset', type=str, choices=['cifar10', 'cifar100', 'dogs'], default='cifar100', help='Dataset name.')
     parser.add_argument('--download', action='store_true', help='Download the specified dataset before running the training.')
     #parser.add_argument('-a', '--architecture', type=str, required=True, help='Model architecture name.')
     parser.add_argument('-a', '--architecture', type=str, default='mobilenetv1_w1', help='Model architecture name.')
@@ -202,7 +202,7 @@ def main():
         # get model
          
         #model = build_NetTOP(10, cifar=True,groups=typesize)
-        model = TickNet_BEST(10, cifar=True)
+        model = TickNet_BEST(100, cifar=True)
         model = model.to(device)
         #print_model_stats(model, input_size=(3,32,32))
         print(model)
