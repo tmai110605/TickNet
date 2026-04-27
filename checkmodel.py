@@ -8,7 +8,7 @@ from torchsummary import summary
 from models.TickNet import *
 #from models.mobilenet_with_FR import *
 
-#model = TickNet_BEST(100, typesize='large',cifar=False)
+model = TickNet_BEST(10,cifar=True)
 #model = build_TickNet(100, typesize='small',cifar=True)
 #model = build_TickNet(100, typesize='large_large_new',cifar=True)
 #model = build_TickNet(1000, typesize='large_new',cifar=False)
