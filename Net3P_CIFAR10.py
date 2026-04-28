@@ -12,7 +12,7 @@ import torch.optim.lr_scheduler
 import torch.utils.data
 import torchvision.transforms
 import torchvision.datasets
-from checkmodel import print_model_stats
+#from checkmodel import print_model_stats
 #from pathlib import Path
 #sys.path.append(str(Path('.').absolute().parent))
 from models.datasets import *
