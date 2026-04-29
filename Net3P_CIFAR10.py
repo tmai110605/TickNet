@@ -26,11 +26,11 @@ def get_args():
     parser = argparse.ArgumentParser(description='TickNet training script for cifar and StanfordDogs datasets.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)    
     parser.add_argument('-r', '--data-root', type=str, default='data', help='Dataset root path.')
     #parser.add_argument('-d', '--dataset', choices=['cifar10', 'cifar100', 'dogs'], required=True, help='Dataset name.')
-    parser.add_argument('-d', '--dataset', type=str, choices=['cifar10', 'cifar100', 'dogs'], default='dogs', help='Dataset name.')
+    parser.add_argument('-d', '--dataset', type=str, choices=['cifar10', 'cifar100', 'dogs'], default='cifar100', help='Dataset name.')
     parser.add_argument('--download', action='store_true', help='Download the specified dataset before running the training.')    
     parser.add_argument('-g', '--gpu-id', default=1, type=int, help='ID of the GPU to use. Set to -1 to use CPU.')
     parser.add_argument('-j', '--workers', default=4, type=int, help='Number of data loading workers.')
-    parser.add_argument('-b', '--batch-size', default=64, type=int, help='Batch size.')        
+    parser.add_argument('-b', '--batch-size', default=128, type=int, help='Batch size.')        
     parser.add_argument('-e', '--epochs', default=200, type=int, help='Number of total epochs to run.')
     parser.add_argument('-l', '--learning-rate', default=0.1, type=float, help='Initial learning rate.')
     parser.add_argument('-s', '--schedule', nargs='+', default=[100, 150, 180], type=int, help='Learning rate schedule (epochs after which the learning rate should be dropped).')    
@@ -172,7 +172,7 @@ def main():
         # get model
         
        # model =model = build_TickNet_BESTvg(120, cifar=False)
-        model = build_TickNet_BESTvg(120, cifar=False, g=4, operator=op)
+        model = build_TickNet_BESTvg(100, cifar=True, g=4, operator=op)
         model = model.to(device)
         #print_model_stats(model, input_size=(3, 224, 224))
         print(model)
