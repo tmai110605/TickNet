@@ -175,7 +175,7 @@ def main():
         model = build_TickNet_BESTvg(10, cifar=True, g=4, operator=op)
         model = model.to(device)
         #print_model_stats(model, input_size=(3, 224, 224))
-        print(model)
+        #print(model)
         
         print('Number of model parameters: {}'.format(
         sum([p.data.nelement() for p in model.parameters()])))
