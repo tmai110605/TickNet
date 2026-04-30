@@ -172,7 +172,7 @@ def main():
         # get model
         
        # model =model = build_TickNet_BESTvg(120, cifar=False)
-        model = build_TickNet_BESTvg(10, cifar=True, g=4, operator=op)
+        model = build_TickNet_BESTvg(10, cifar=True, g=1, operator=op)
         model = model.to(device)
         print_model_stats(model, input_size=(3, 32, 32))
         #print(model)
